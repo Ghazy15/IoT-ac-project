@@ -30,9 +30,9 @@ String NODE_ID = "AC_" + String((uint32_t)ESP.getEfuseMac(), HEX);
 #define MAX_TEMP 30
 
 // --- IR SETTINGS ---
-const uint16_t kCaptureBufferSize = 1024; // Large buffer for AC
-const uint8_t  kTimeout = 50;             // 50ms Timeout
-const uint16_t kFrequency = 38;           // 38kHz
+const uint16_t kCaptureBufferSize = 1024; 
+const uint8_t  kTimeout = 50;             
+const uint16_t kFrequency = 38;           
 
 // OBJECTS
 WiFiClient espClient;
@@ -40,7 +40,6 @@ PubSubClient mqtt(espClient);
 WiFiUDP udp;
 IPAddress fileServerIP;
 
-// Initialize IR
 IRrecv irrecv(IR_RX_PIN, kCaptureBufferSize, kTimeout, true);
 IRsend irsend(IR_TX_PIN);
 decode_results results;
@@ -49,6 +48,7 @@ decode_results results;
 bool acPower = false;
 int acTemp = 24; 
 unsigned long lastHeartbeat = 0;
+unsigned long lastLoopDebug = 0;
 
 /* ---------------- LOCAL STORAGE ---------------- */
 void saveIR(String name, uint16_t* raw, uint16_t len) {
@@ -114,15 +114,6 @@ void syncAll() {
 }
 
 /* ---------------- LOGIC ---------------- */
-// Matches signals with tolerance
-bool matchProtocol(uint16_t* buf1, uint16_t len1, uint16_t* buf2, uint16_t len2) {
-  if (abs(len1 - len2) > 5) return false;
-  for (uint16_t i = 0; i < len1; i++) {
-    if (abs(buf1[i] - buf2[i]) > (buf1[i] / 4)) return false; 
-  }
-  return true;
-}
-
 void publishState() {
   char msg[128]; 
   sprintf(msg, "{\"power\":%s,\"temp\":%d}", acPower?"true":"false", acTemp);
@@ -130,6 +121,7 @@ void publishState() {
 }
 
 void updateState(String cmd) {
+  Serial.println("[STATE] Logic Update: " + cmd);
   if (cmd == "on") acPower = true;
   else if (cmd == "off") acPower = false;
   else if (cmd == "power") acPower = !acPower;
@@ -148,6 +140,17 @@ void updateState(String cmd) {
   publishState();
 }
 
+// 📡 MATCHING LOGIC
+bool matchProtocol(uint16_t* incoming, uint16_t len1, uint16_t* saved, uint16_t len2) {
+  if (abs(len1 - len2) > 10) return false; 
+  for (uint16_t i = 0; i < len1 && i < len2; i++) {
+    uint16_t diff = abs(incoming[i] - saved[i]);
+    uint16_t tolerance = saved[i] * 0.35; // Increased tolerance to 35%
+    if (diff > tolerance) return false; 
+  }
+  return true;
+}
+
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String msg; for(int i=0;i<length;i++) msg += (char)payload[i];
   
@@ -162,6 +165,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
   String name = doc["name"];
 
   if (action == "learn") {
+    Serial.println("[LEARN] Start Learning: " + name);
     unsigned long start = millis();
     while (millis() - start < 10000) { 
       mqtt.loop();
@@ -173,6 +177,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
           uploadSignal(name, raw, len); 
           delete[] raw;
           mqtt.publish((TOPIC_PREFIX + NODE_ID + "/event").c_str(), "{\"event\":\"learned\"}");
+          Serial.println("[LEARN] Success!");
+          
+          // ⚠️ IMPORTANT: Restart Receiver
+          irrecv.enableIRIn(); 
           break;
         }
         irrecv.resume();
@@ -186,17 +194,21 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     
     uint16_t* raw; uint16_t len;
     
-    // ⬇️ SINGLE SHOT MODE (NO BURST) ⬇️
     if (loadIR(fileToSend, raw, len)) {
-      Serial.println("Sending Signal: " + name);
-      irrecv.pause(); 
+      Serial.println("[SEND] Sending: " + name);
+      
+      // ⚠️ STOP LISTENING BEFORE SENDING
+      irrecv.disableIRIn(); 
+      delay(10);
 
-      // Just ONE send, no delay, no second shot
       irsend.sendRaw(raw, len, kFrequency);
       
-      irrecv.resume(); 
-      delete[] raw;
+      // ⚠️ RESTART LISTENER AFTER SENDING
+      delay(10);
+      irrecv.enableIRIn(); 
+      Serial.println("[SEND] Receiver Restarted");
       
+      delete[] raw;
       updateState(name);
     }
   } 
@@ -210,8 +222,11 @@ void setup() {
   LittleFS.begin(true);
   if (!LittleFS.exists("/codes")) LittleFS.mkdir("/codes");
   
-  irrecv.enableIRIn(); 
+  // ⚠️ CRITICAL ORDER: Start Sender FIRST, then Receiver
   irsend.begin();
+  delay(50);
+  irrecv.enableIRIn(); 
+  Serial.println("[SYSTEM] IR Subsystem Initialized");
 
   WiFiManager wm; wm.setTimeout(180);
   if(!wm.autoConnect("AC_SETUP")) ESP.restart();
@@ -233,6 +248,7 @@ void setup() {
 }
 
 void loop() {
+  // 1. Connection Logic
   if (!mqtt.connected()) {
     unsigned long now = millis();
     static unsigned long lastReconnectAttempt = 0;
@@ -241,7 +257,6 @@ void loop() {
       if (mqtt.connect(NODE_ID.c_str())) { 
         mqtt.subscribe((TOPIC_PREFIX + NODE_ID + "/cmd").c_str());
         mqtt.subscribe((TOPIC_PREFIX + "global/scan").c_str());
-        
         mqtt.publish((TOPIC_PREFIX + "discovery").c_str(), ("{\"node\":\"" + NODE_ID + "\",\"model\":\"" + MODEL_NAME + "\"}").c_str(), true);
         publishState();
       }
@@ -249,28 +264,45 @@ void loop() {
   }
   mqtt.loop();
 
+  // 2. Debug Pulse (Checks if loop is frozen)
+  if (millis() - lastLoopDebug > 5000) {
+    lastLoopDebug = millis();
+    // Serial.println("[SYSTEM] Loop is running..."); // Uncomment if needed
+  }
+
+  // 3. Heartbeat
   if (millis() - lastHeartbeat > 15000) {
     lastHeartbeat = millis();
     if(mqtt.connected()) publishState(); 
   }
 
+  // 4. IR LISTENER
   if (irrecv.decode(&results)) {
+    // Only care about long signals (AC commands)
     if (results.rawlen > 40) {
+      Serial.print("[IR] RAW SIGNAL DETECTED. Len: ");
+      Serial.println(results.rawlen - 1);
+
       uint16_t* incomingRaw = resultToRawArray(&results);
       uint16_t incomingLen = results.rawlen - 1;
 
       File root = LittleFS.open("/codes");
       File f = root.openNextFile();
+      bool match = false;
+
       while(f) {
         String fname = f.name();
         if(fname.endsWith(".json")) {
           String cleanName = fname;
           cleanName.replace("/codes/", ""); cleanName.replace(".json", "");
+          
           uint16_t* fileRaw; uint16_t fileLen;
           if(loadIR(cleanName, fileRaw, fileLen)) {
             if(matchProtocol(incomingRaw, incomingLen, fileRaw, fileLen)) {
+              Serial.println("[MATCH] ✅ Signal Matches: " + cleanName);
               updateState(cleanName);
               delete[] fileRaw;
+              match = true;
               break;
             }
             delete[] fileRaw;
@@ -278,8 +310,12 @@ void loop() {
         }
         f = root.openNextFile();
       }
+      if (!match) Serial.println("[MATCH] ❌ No saved signal matched.");
+      
       delete[] incomingRaw; 
     }
+    
+    // ⚠️ ESSENTIAL: Resume listening for next signal
     irrecv.resume();
   }
 }
