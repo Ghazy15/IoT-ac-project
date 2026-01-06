@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart AC Controller</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .glass { background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px); }
+        .fade-in { animation: fadeIn 0.5s ease-out; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    </style>
+</head>
+<body class="bg-slate-100 text-slate-800 h-screen overflow-hidden">
+
+    <div id="login-screen" class="fixed inset-0 z-50 bg-slate-900 flex items-center justify-center fade-in">
+        <div class="bg-white p-8 rounded-2xl shadow-2xl w-96 text-center">
+            <div class="mb-6">
+                <i class="fa-solid fa-wind text-5xl text-blue-500"></i>
+            </div>
+            <h2 class="text-2xl font-bold mb-2">AC Control Hub</h2>
+            <p class="text-gray-500 mb-6">Enter Wi-Fi Credentials to Initialize</p>
+            
+            <input type="text" id="wifi-ssid" placeholder="Wi-Fi SSID" class="w-full p-3 border rounded-lg mb-3 focus:ring-2 focus:ring-blue-500 outline-none">
+            <input type="password" id="wifi-pass" placeholder="Password" class="w-full p-3 border rounded-lg mb-6 focus:ring-2 focus:ring-blue-500 outline-none">
+            
+            <button onclick="login()" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition">
+                Enter Dashboard
+            </button>
+        </div>
+    </div>
+
+    <div id="dashboard" class="flex h-full hidden">
+        
+        <div class="w-80 bg-white border-r border-gray-200 flex flex-col">
+            <div class="p-6 border-b border-gray-100">
+                <h1 class="font-bold text-xl flex items-center gap-2">
+                    <i class="fa-solid fa-circle-nodes text-blue-600"></i> Devices
+                </h1>
+            </div>
+            <div id="node-list" class="flex-1 overflow-y-auto p-4 space-y-3">
+                <div class="text-center text-gray-400 mt-10">
+                    <i class="fa-solid fa-spinner fa-spin text-2xl mb-2"></i>
+                    <p>Searching for ACs...</p>
+                </div>
+            </div>
+        </div>
+
+        <div class="flex-1 flex flex-col relative">
+            <div class="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-8">
+                <div id="selected-node-header" class="font-bold text-lg text-gray-700">Select a Device</div>
+                <div class="text-sm text-gray-500" id="clock">--:--</div>
+            </div>
+
+            <div id="control-panel" class="flex-1 p-8 overflow-y-auto bg-slate-50 relative">
+                
+                <div class="grid grid-cols-2 gap-6 mb-8 max-w-4xl mx-auto">
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Power Status</p>
+                            <h3 id="twin-power" class="text-3xl font-bold text-gray-800">--</h3>
+                        </div>
+                        <div id="twin-power-icon" class="text-4xl text-gray-200"><i class="fa-solid fa-power-off"></i></div>
+                    </div>
+                    <div class="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex items-center justify-between">
+                        <div>
+                            <p class="text-gray-500 text-sm">Target Temp</p>
+                            <h3 id="twin-temp" class="text-3xl font-bold text-gray-800">--°C</h3>
+                        </div>
+                        <div class="text-4xl text-blue-100"><i class="fa-solid fa-temperature-half"></i></div>
+                    </div>
+                </div>
+
+                <div class="max-w-4xl mx-auto bg-white rounded-2xl shadow-sm border border-gray-100 p-8">
+                    <h3 class="font-bold text-gray-700 mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-gamepad"></i> Controls
+                    </h3>
+
+                    <div class="flex gap-3 mb-6">
+                        <input id="signal-input" type="text" placeholder="New Signal Name (e.g. sleep_mode)" 
+                               class="flex-1 p-3 bg-gray-50 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none">
+                        <button onclick="sendSignal('learn')" class="bg-purple-100 text-purple-700 px-6 rounded-lg font-bold hover:bg-purple-200">
+                            <i class="fa-solid fa-ear-listen"></i> Learn
+                        </button>
+                    </div>
+
+                    <hr class="border-gray-100 mb-6">
+
+                    <div id="button-grid" class="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                        <div class="col-span-full text-center text-gray-400 py-8">
+                            Select a device to see controls
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // STATE
+        let nodes = {};
+        let activeNodeId = null;
+        let learnedSignals = [];
+        
+        // 1. LOGIN LOGIC
+        function login() {
+            const ssid = document.getElementById('wifi-ssid').value;
+            // We save these just in session to potentially update nodes later
+            sessionStorage.setItem('wifi_ssid', ssid);
+            
+            document.getElementById('login-screen').style.opacity = '0';
+            setTimeout(() => {
+                document.getElementById('login-screen').classList.add('hidden');
+                document.getElementById('dashboard').classList.remove('hidden');
+            }, 500);
+        }
+
+        // 2. REAL-TIME CONNECTION
+        const evtSource = new EventSource("/events");
+        evtSource.onmessage = (event) => {
+            const msg = JSON.parse(event.data);
+            
+            if (msg.type === 'update') {
+                nodes = msg.data;
+                renderSidebar();
+                if (activeNodeId) updateTwinDisplay();
+            }
+            if (msg.type === 'new_signal') {
+                // Refresh buttons if we are on that model
+                if(activeNodeId) fetchButtons(nodes[activeNodeId].model);
+            }
+        };
+
+        // 3. RENDER SIDEBAR
+        function renderSidebar() {
+            const list = document.getElementById('node-list');
+            list.innerHTML = '';
+
+            Object.values(nodes).forEach(node => {
+                const isOnline = (Date.now() - node.lastSeen) < 60000;
+                const statusColor = isOnline ? 'bg-green-500' : 'bg-red-500';
+                const isActive = activeNodeId === node.id ? 'bg-blue-50 border-blue-200' : 'hover:bg-gray-50 border-transparent';
+
+                const el = document.createElement('div');
+                el.className = `p-4 rounded-xl border cursor-pointer transition ${isActive}`;
+                el.onclick = () => selectNode(node.id);
+                el.innerHTML = `
+                    <div class="flex items-center justify-between mb-2">
+                        <span class="font-bold text-gray-700 text-sm truncate w-32">${node.id}</span>
+                        <div class="flex items-center gap-2">
+                            <span class="text-xs text-gray-400">${isOnline ? 'Online' : 'Offline'}</span>
+                            <span class="w-2 h-2 rounded-full ${statusColor}"></span>
+                        </div>
+                    </div>
+                    <div class="text-xs text-gray-400">Model: ${node.model}</div>
+                `;
+                list.appendChild(el);
+            });
+        }
+
+        // 4. SELECT NODE
+        function selectNode(id) {
+            activeNodeId = id;
+            document.getElementById('selected-node-header').innerHTML = `
+                <div class="flex items-center gap-2">
+                    <i class="fa-solid fa-server text-blue-500"></i> ${id}
+                </div>
+            `;
+            renderSidebar();
+            updateTwinDisplay();
+            fetchButtons(nodes[id].model);
+        }
+
+        // 5. UPDATE TWIN DISPLAY
+        function updateTwinDisplay() {
+            if (!activeNodeId || !nodes[activeNodeId]) return;
+            const state = nodes[activeNodeId].state;
+            
+            const pwr = state.power ? "ON" : "OFF";
+            const temp = state.temp || "--";
+            
+            document.getElementById('twin-power').innerText = pwr;
+            document.getElementById('twin-temp').innerText = temp + "°C";
+            
+            const pwrIcon = document.getElementById('twin-power-icon');
+            if(state.power) {
+                pwrIcon.className = "text-4xl text-green-500"; 
+            } else {
+                pwrIcon.className = "text-4xl text-red-400";
+            }
+        }
+
+        // 6. FETCH & RENDER BUTTONS
+        async function fetchButtons(modelName) {
+            const res = await fetch(`/api/signals/${modelName}`);
+            learnedSignals = await res.json();
+            
+            const grid = document.getElementById('button-grid');
+            grid.innerHTML = '';
+
+            if (learnedSignals.length === 0) {
+                grid.innerHTML = '<div class="col-span-full text-center text-gray-400">No signals learned yet. Use the box above!</div>';
+                return;
+            }
+
+            learnedSignals.forEach(sig => {
+                const btn = document.createElement('button');
+                
+                // Style specific buttons differently
+                let colorClass = "bg-gray-100 hover:bg-gray-200 text-gray-700";
+                let icon = "fa-circle";
+                
+                if(sig === 'off') { colorClass = "bg-red-100 hover:bg-red-200 text-red-700"; icon = "fa-power-off"; }
+                else if(sig === 'on' || sig === 'power') { colorClass = "bg-green-100 hover:bg-green-200 text-green-700"; icon = "fa-power-off"; }
+                else if(sig.includes('temp')) { colorClass = "bg-blue-100 hover:bg-blue-200 text-blue-700"; icon = "fa-temperature-half"; }
+
+                btn.className = `${colorClass} py-4 rounded-xl font-bold transition flex flex-col items-center justify-center gap-2`;
+                btn.onclick = () => sendSignal('send', sig);
+                btn.innerHTML = `<i class="fa-solid ${icon}"></i> ${sig.replace('_', ' ').toUpperCase()}`;
+                
+                grid.appendChild(btn);
+            });
+        }
+
+        // 7. SEND COMMAND
+        async function sendSignal(action, forcedName = null) {
+            if(!activeNodeId) return alert("Select a device first!");
+            
+            const inputVal = document.getElementById('signal-input').value;
+            const name = forcedName || inputVal;
+            
+            if(!name) return alert("Enter a signal name!");
+
+            try {
+                await fetch('/api/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        nodeId: activeNodeId, 
+                        action, 
+                        name,
+                        // If we ever implement wifi update, we can pass creds here
+                        ssid: sessionStorage.getItem('wifi_ssid') 
+                    })
+                });
+                
+                // If learning, clear input
+                if(action === 'learn') {
+                    document.getElementById('signal-input').value = '';
+                    alert("Listening for IR signal...");
+                }
+
+            } catch(e) { console.error(e); }
+        }
+
+        // Clock
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('clock').innerText = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }, 1000);
+
+    </script>
+</body>
+</html>
