@@ -19,15 +19,11 @@
             <div class="mb-6">
                 <i class="fa-solid fa-wind text-5xl text-blue-500"></i>
             </div>
-            <h2 class="text-2xl font-bold mb-2">AC Control Hub</h2>
-            <p class="text-gray-500 mb-6">Enter Wi-Fi Credentials to Initialize</p>
-            
-            <input type="text" id="wifi-ssid" placeholder="Wi-Fi SSID" class="w-full p-3 border rounded-lg mb-3 focus:ring-2 focus:ring-blue-500 outline-none">
-            <input type="password" id="wifi-pass" placeholder="Password" class="w-full p-3 border rounded-lg mb-6 focus:ring-2 focus:ring-blue-500 outline-none">
-            
-            <button onclick="login()" class="w-full bg-blue-600 text-white py-3 rounded-lg font-bold hover:bg-blue-700 transition">
-                Enter Dashboard
-            </button>
+            <h2 class="text-2xl font-bold mb-2 text-slate-800">Smart AC Control</h2>
+            <p class="text-gray-400 mb-6 text-sm">Masukkan PIN Keamanan untuk lanjut</p>
+            <div class="space-y-3">
+                <input type="password" id="wifi-pass" placeholder="Masukkan Password / PIN" class="w-full p-4 bg-slate-50 text-center text-xl tracking-widest border border-slate-200 rounded-xl outline-none focus:ring-2 focus:ring-blue-500 transition">
+            </div>
         </div>
     </div>
 
@@ -106,15 +102,23 @@
         
         // 1. LOGIN LOGIC
         function login() {
-            const ssid = document.getElementById('wifi-ssid').value;
-            // We save these just in session to potentially update nodes later
-            sessionStorage.setItem('wifi_ssid', ssid);
-            
-            document.getElementById('login-screen').style.opacity = '0';
-            setTimeout(() => {
+            // ==========================================
+            // TENTUKAN PASSWORD DASHBOARD ANDA DI SINI
+            // ==========================================
+            const DASHBOARD_PASSWORD = "admin"; 
+
+            // Ambil nilai yang diketik oleh user
+            const inputPass = document.getElementById('wifi-pass').value;
+
+            // Cek apakah password cocok
+            if (inputPass === DASHBOARD_PASSWORD) {
+                // Jika BENAR, sembunyikan layar login dan masuk ke dashboard
                 document.getElementById('login-screen').classList.add('hidden');
-                document.getElementById('dashboard').classList.remove('hidden');
-            }, 500);
+            } else {
+                // Jika SALAH, tampilkan peringatan dan kosongkan kolom
+                alert("❌ Password Salah! Anda tidak berhak mengakses dashboard ini.");
+                document.getElementById('wifi-pass').value = ''; // Kosongkan input
+            }
         }
 
         // 2. REAL-TIME CONNECTION
