@@ -5,12 +5,14 @@ const fs = require("fs");
 const path = require("path");
 const dgram = require("dgram"); 
 const cors = require("cors");
+const os = require("os"); 
 const app = express();
 const http = require('http').createServer(app);
 
 app.use(express.json());
 app.use(cors());
-app.use(express.static("public")); 
+// Menggunakan process.cwd() agar .exe membaca folder public di lokasi fisik yang sama
+app.use(express.static(path.join(process.cwd(), "public"))); 
 
 /* ----- CONFIG ----- */
 const PORT = 3000;
@@ -20,20 +22,51 @@ const TOPIC_PREFIX = "/ac_project_unique_123/";
 /* ----- STATE ----- */
 const nodes = {}; // Stores { id, state, lastSeen, model }
 
-// 1. MQTT CONNECTION
-// ... imports ...
+// ================= FUNGSI MENCARI IP KOMPUTER (DIPERBAIKI) =================
+function getLocalIP() {
+  const interfaces = os.networkInterfaces();
+  let fallbackIP = 'localhost';
 
+  for (const devName in interfaces) {
+    const iface = interfaces[devName];
+    
+    for (let i = 0; i < iface.length; i++) {
+      const alias = iface[i];
+      
+      // Cari IPv4, bukan localhost, dan bukan jaringan internal
+      if (alias.family === 'IPv4' && alias.address !== '127.0.0.1' && !alias.internal) {
+        const nameLower = devName.toLowerCase();
+        
+        // 1. FILTER: Abaikan adapter virtual (VMware, VirtualBox, WSL, Hyper-V)
+        if (nameLower.includes('vmware') || nameLower.includes('virtual') || nameLower.includes('veth') || nameLower.includes('wsl')) {
+          continue; // Lewati jaringan ini
+        }
+
+        // 2. PRIORITAS: Jika namanya Wi-Fi atau Wireless, langsung gunakan ini!
+        if (nameLower.includes('wi-fi') || nameLower.includes('wireless') || nameLower.includes('wlan')) {
+          return alias.address; 
+        }
+
+        // 3. CADANGAN: Jika ada koneksi LAN fisik (Ethernet), simpan dulu
+        fallbackIP = alias.address;
+      }
+    }
+  }
+  return fallbackIP;
+}
+
+// 1. MQTT CONNECTION
 const client = mqtt.connect(MQTT_HOST, { port: 1883 });
 
 client.on("connect", () => {
-  console.log(`[MQTT] Connected`);
+  console.log(`[MQTT] Connected to HiveMQ`);
   
   // 1. Subscribe to everything
   client.subscribe(TOPIC_PREFIX + "+/state");
   client.subscribe(TOPIC_PREFIX + "discovery");
   
   // 2. ⚡ FORCE SCAN: Tell all ESPs to announce themselves immediately
-  console.log("[MQTT] Scanning for devices...");
+  console.log("[MQTT] Scanning for AC devices...");
   client.publish(TOPIC_PREFIX + "global/scan", "scan");
 });
 
@@ -42,9 +75,6 @@ client.on("message", (topic, payload) => {
     const msg = JSON.parse(payload.toString());
     
     // Determine Node ID
-    // Discovery msg format: {"node": "AC_...", "model": "..."}
-    // State msg format: {"power": true ...} -> Topic is .../AC_.../state
-    
     let nodeId = null;
     let model = "Office_AC_1"; // Default
 
@@ -59,7 +89,7 @@ client.on("message", (topic, payload) => {
       // Create node if not exists
       if (!nodes[nodeId]) {
         nodes[nodeId] = { id: nodeId, state: {}, lastSeen: Date.now(), model: model };
-        console.log(`[NEW NODE] ${nodeId} (${model})`);
+        console.log(`[NEW NODE DETECTED] ${nodeId} (${model})`);
         
         // Notify UI immediately about new node
         broadcast();
@@ -99,8 +129,8 @@ function broadcast() {
   clients.forEach(c => c.write(payload));
 }
 
-// Watch for file changes to update buttons immediately
-const PROFILE_DIR = path.join(__dirname, "profiles");
+// Menggunakan process.cwd() agar .exe membaca/menulis folder profiles di lokasi fisik
+const PROFILE_DIR = path.join(process.cwd(), "profiles");
 if (!fs.existsSync(PROFILE_DIR)) fs.mkdirSync(PROFILE_DIR);
 
 /* ----- 3. API ENDPOINTS ----- */
@@ -126,7 +156,6 @@ app.post("/api/control", (req, res) => {
   // Handle Wi-Fi Update Special Case
   if (action === "update_wifi") {
     console.log(`[WIFI] Sending new creds to ${nodeId}`);
-    // NOTE: This requires ESP32 support, but we send it via MQTT here
     client.publish(topic, JSON.stringify({ action: "wifi", ssid, pass })); 
   } else {
     console.log(`[CMD] ${action} -> ${nodeId} (${name})`);
@@ -143,7 +172,7 @@ app.post("/api/profile/upload", (req, res) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   
   fs.writeFileSync(path.join(dir, `${signalName}.json`), JSON.stringify(data));
-  console.log(`[FILE] Learned: ${signalName}`);
+  console.log(`[FILE] Learned & Saved: ${signalName}.json`);
   
   // Notify UI that a new button exists
   clients.forEach(c => c.write(`data: ${JSON.stringify({ type: 'new_signal', model: modelName })}\n\n`));
@@ -159,4 +188,15 @@ udpServer.on('message', (msg, rinfo) => {
 });
 udpServer.bind(9999);
 
-http.listen(PORT, () => console.log(`[UI] Dashboard: http://localhost:${PORT}`));
+// ================= START SERVER =================
+http.listen(PORT, () => {
+  const networkIP = getLocalIP();
+  console.log(`\n===========================================`);
+  console.log(` 🌟 SMART AC CONTROLLER SERVER BERJALAN 🌟 `);
+  console.log(`===========================================`);
+  console.log(`\nBuka Dashboard melalui Browser:`);
+  console.log(`➜ Di Komputer ini : http://localhost:${PORT}`);
+  console.log(`➜ Di HP / Laptop  : http://${networkIP}:${PORT}`);
+  console.log(`\n(Pastikan HP terhubung ke WiFi yang sama)`);
+  console.log(`===========================================\n`);
+});
